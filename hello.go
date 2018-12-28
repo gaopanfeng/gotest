@@ -134,7 +134,7 @@ func readAndPart(fileName string, index int, parts [][2]int64, realNum int, part
 			os.Exit(2)
 		}
 		fsAll[b[0]][b[1]][index] = int(st.Size())
-		//files[b[0]][b[1]].Close()
+		files[b[0]][b[1]].Close()
 	}
 	stopCh <- index
 }
@@ -158,7 +158,13 @@ func readFileLines(filename string) [][]byte {
 				len++
 			}
 		}
+		if file != nil {
+			file.Close()
+		}
 		return list
+	}
+	if file != nil {
+		file.Close()
 	}
 	return nil
 }
@@ -179,9 +185,10 @@ func getLines(bb [2]byte, workDir string) [][]byte {
 		}
 	}
 	var lines [][]byte = make([][]byte, 0, size)
-	for _, items := range list {
+	for i, items := range list {
 		if items != nil {
 			lines = append(lines, items...)
+			list[i] = nil
 		}
 	}
 	return lines
