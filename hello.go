@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"runtime"
@@ -17,9 +16,16 @@ import (
 //import "math"
 //import "io/ioutil"
 
+type PartFileInfo struct {
+	files  [CPU]*os.File
+	size   [CPU]int
+	total  int
+	offset int64
+}
+
 const (
 	MMAP           = false
-	SORT_READ_MMAP = true
+	SORT_READ_MMAP = false
 	CPU            = 6
 	K              = 1024
 	M              = K * K
@@ -30,7 +36,9 @@ var startTime time.Time
 var stopWg sync.WaitGroup
 var partIndexAtomic uint32
 var lock sync.Mutex
-var fsFile [128][128][CPU]*os.File
+
+// var fsFile [128][128][CPU]*os.File
+var partFileInfos [128][128]PartFileInfo
 
 func Max(x, y int64) int64 {
 	if x < y {
@@ -80,45 +88,17 @@ func splitFile(filePath string, fileLen int64, num int64) ([][2]int64, int) {
 	}
 }
 
-func readFileBytes(bb [2]byte, index int) []byte {
-	file := fsFile[bb[0]][bb[1]][index]
-	defer file.Close()
-	fs, _ := file.Stat()
-	len := fs.Size()
-	// fmt.Printf("%s%d:%d\n", bb, index, len)
-	if len > 0 {
-		var mmap []byte
-		if SORT_READ_MMAP {
-			mmap, _ = syscall.Mmap(int(file.Fd()), 0, int(len), syscall.PROT_READ, syscall.MAP_SHARED)
-		} else {
-			mmap = make([]byte, len)
-			file.Seek(0, 0)
-			file.Read(mmap)
-		}
-		// var mmap = make([]byte, len)
-		// file.Seek(0, 0)
-		// file.Read(mmap)
-		return mmap
-
-	}
-	return nil
-}
-
 func asyncReadFileBytes(bb [2]byte, index int, ch chan []byte) {
-	file := fsFile[bb[0]][bb[1]][index]
+
+	partInfo := partFileInfos[bb[0]][bb[1]]
+	file := partInfo.files[index]
 	defer file.Close()
-	fs, _ := file.Stat()
-	len := fs.Size()
+	len := partInfo.size[index]
 	// fmt.Printf("%s%d:%d\n", bb, index, len)
 	if len > 0 {
-		var mmap []byte
-		if SORT_READ_MMAP {
-			mmap, _ = syscall.Mmap(int(file.Fd()), 0, int(len), syscall.PROT_READ, syscall.MAP_SHARED)
-		} else {
-			mmap = make([]byte, len)
-			file.Seek(0, 0)
-			file.Read(mmap)
-		}
+		var mmap = bytesPool.Get().([]byte)[:len]
+		file.Seek(0, 0)
+		file.Read(mmap)
 		ch <- mmap
 	} else {
 		ch <- nil
@@ -143,6 +123,7 @@ func bytes2Lines(bytesArray [][]byte) [][]byte {
 				list = append(list, line)
 				line, err = buf.ReadBytes('\n')
 			}
+			bytesPool.Put(bs)
 		}
 
 		return list
@@ -151,12 +132,6 @@ func bytes2Lines(bytesArray [][]byte) [][]byte {
 }
 
 func aGetLines(bb [2]byte, workDir string) [][]byte {
-	// var list = make([][][]byte, CPU)
-	filename := workDir + string(bb[0])
-	if bb[1] != 0 {
-		filename += string(bb[1])
-	}
-	// size := 0
 	var tmpCh = make(chan []byte, CPU)
 	for i := 0; i < CPU; i++ {
 		go asyncReadFileBytes(bb, i, tmpCh)
@@ -167,36 +142,6 @@ func aGetLines(bb [2]byte, workDir string) [][]byte {
 		tmp[i] = tmpItem
 	}
 	close(tmpCh)
-	// var lines = make([][]byte, 0, size)
-	// for i, items := range list {
-	// 	if items != nil {
-	// 		lines = append(lines, items...)
-	// 		list[i] = nil
-	// 	}
-	// }
-	return bytes2Lines(tmp)
-}
-
-func getLines(bb [2]byte, workDir string) [][]byte {
-	// var list = make([][][]byte, CPU)
-	filename := workDir + string(bb[0])
-	if bb[1] != 0 {
-		filename += string(bb[1])
-	}
-	// size := 0
-	var tmp = make([][]byte, CPU)
-	var tmpItem []byte
-	for i := 0; i < CPU; i++ {
-		tmpItem = readFileBytes(bb, i)
-		tmp[i] = tmpItem
-	}
-	// var lines = make([][]byte, 0, size)
-	// for i, items := range list {
-	// 	if items != nil {
-	// 		lines = append(lines, items...)
-	// 		list[i] = nil
-	// 	}
-	// }
 	return bytes2Lines(tmp)
 }
 
@@ -273,24 +218,34 @@ func mergeSort(array [][]byte, tmp [][]byte, start int, end int) {
 	}
 }
 
-func readAndPart(fileName string, index int, parts [][2]int64, realNum int, bytesList *[26 * 27][2]byte, workDir string, fsAll *[128][128][6]int) {
+func readAndPart(fileName string, index int, parts [][2]int64, realNum int, bytesList *[26 * 27][2]byte, workDir string) {
 	defer stopWg.Done()
-	var files [128][128]*os.File
 	var out [128][128]*bufio.Writer
-	var filename string
-	var tmpFile *os.File
 	for _, b := range bytesList {
-		filename = workDir + string(b[0])
-		if b[1] != 0 {
-			filename = filename + string(b[1])
-		}
-		filename = filename + "." + strconv.Itoa(index)
-		//fmt.Printf("createFile=%s\n", filename);
-		tmpFile, _ = os.Create(filename)
-		files[b[0]][b[1]] = tmpFile
-		fsFile[b[0]][b[1]][index] = tmpFile
-		out[b[0]][b[1]] = bufio.NewWriterSize(tmpFile, 2<<14)
+		out[b[0]][b[1]] = bufio.NewWriterSize(partFileInfos[b[0]][b[1]].files[index], 2<<14)
 	}
+	ch := make(chan []byte)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		var ln int
+		for mmap := range ch {
+			start := 0
+			for i, b := range mmap {
+				if b == byte('\n') {
+					tmp := mmap[start : i+1]
+					ln = len(tmp)
+					if ln == 1 {
+						out[tmp[0]][0].Write(tmp)
+					} else {
+						out[tmp[0]][tmp[1]].Write(tmp)
+					}
+					start = i + 1
+				}
+			}
+		}
+		wg.Done()
+	}()
 	file, err := os.Open(fileName)
 	if err != nil {
 		fmt.Println("open file err!", err)
@@ -310,124 +265,101 @@ func readAndPart(fileName string, index int, parts [][2]int64, realNum int, byte
 		s := time.Now().UnixNano()
 		var mmap []byte
 		if MMAP {
-			mmap, _ = syscall.Mmap(int(file.Fd()), part[0], int(total), syscall.PROT_READ, syscall.MAP_SHARED)
+			//mmap, _ = syscall.Mmap(int(file.Fd()), part[0], int(total), syscall.PROT_READ, syscall.MAP_SHARED)
 		} else {
 			mmap = make([]byte, total)
 			file.ReadAt(mmap, part[0])
 		}
 		cost += (time.Now().UnixNano() - s)
-		start := 0
-		ln := 0
-		for i, b := range mmap {
-			if b == byte('\n') {
-				tmp := mmap[start : i+1]
-				if tmp == nil {
-					fmt.Println("ok")
-				}
-				if ln == 1 {
-					out[tmp[0]][0].Write(tmp)
-				} else {
-					//fmt.Printf("debug:len=%d,tmp=%s",len(tmp), tmp);
-					out[tmp[0]][tmp[1]].Write(tmp)
-				}
-
-				ln = 0
-				start = i + 1
-			} else {
-				ln++
-			}
-		}
+		ch <- mmap
 		// fmt.Printf("readAndPart:index=%d,end=%d,part=%d\n", index, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond), part)
 	}
 	fmt.Printf("read%d real-cost:%d\n", index, cost/int64(time.Millisecond))
+	close(ch)
+	wg.Wait()
 	var st os.FileInfo
 	for _, b := range bytesList {
-		// fmt.Printf("createFile=%s\n", filename);
 		out[b[0]][b[1]].Flush()
-		st, err = files[b[0]][b[1]].Stat()
+		st, err = partFileInfos[b[0]][b[1]].files[index].Stat()
 		if err != nil {
 			fmt.Println("error!", err)
 			os.Exit(0)
 		}
-		//fmt.Printf("createFile=%s,size=%d\n", b, st.Size())
-		fsAll[b[0]][b[1]][index] = int(st.Size())
-		//files[b[0]][b[1]].Close()
+		partFileInfos[b[0]][b[1]].size[index] = int(st.Size())
 	}
 }
 
-func sortAndWrite(index int, bytesList [26 * 27][2]byte, workDir string, fsPos *[128][128]int64, fs *[128][128]int, outList chan OutPart, tasks int) {
+func sortAndWrite(index int, bytesList [26 * 27][2]byte, workDir string, outList chan OutPart, tasks int) {
 
 	max := len(bytesList)
 	var cost int64
 	var sortCost int64
-	for {
-		partIndex := int(atomic.AddUint32(&partIndexAtomic, 1) - 1)
-		if partIndex >= max {
-			if partIndex >= max+tasks-1 {
-				close(outList)
-			}
-			break
-		}
-		bb := bytesList[partIndex]
-		sum := fs[bb[0]][bb[1]]
-		if sum > 0 {
-			pos := fsPos[bb[0]][bb[1]]
-			// fmt.Printf("sortAndWrite:%s,start=%d\n", bb, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
-			s := time.Now().UnixNano()
-			var lines = aGetLines(bb, workDir)
-			cost += (time.Now().UnixNano() - s)
+	var partInfo PartFileInfo
+
+	ch := make(chan OutPart)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		var s int64
+		var lines [][]byte
+		//var sum int
+		for item := range ch {
 			s = time.Now().UnixNano()
+			lines = item.lines
+			//sum = item.sum
 			var tmp = make([][]byte, len(lines))
 			mergeSort(lines, tmp, 0, len(lines)-1)
-			// sort.Slice(lines, func(i, j int) bool {
-			// 	// less func should return sortitems[i] < sortitems[j]
-			// 	//return bytes.Compare(sortitems[i], sortitems[j]) < 0
-			// 	lj := len(lines[j])
-			// 	li := len(lines[i])
-			// 	var lenCom bool
-			// 	var min int
-			// 	if li < lj {
-			// 		lenCom = true
-			// 		min = li
-			// 	} else {
-			// 		min = lj
-			// 	}
-			// 	min--
-			// 	for k := 2; k < min; k++ {
-			// 		if lines[i][k] < lines[j][k] {
-			// 			return true
-			// 		}
-			// 		if lines[i][k] > lines[j][k] {
-			// 			return false
-			// 		}
-			// 	}
-			// 	return lenCom
-			// })
 			sortCost += (time.Now().UnixNano() - s)
-			var buf = make([]byte, 0, sum)
+			var buf = bytesPool.Get().([]byte)[:0]
 			for _, item := range lines {
 				buf = append(buf, item...)
 				// buf = append(buf, byte('\n'))
 			}
 
-			part := OutPart{
-				bytes:  buf,
+			item.bytes = buf
+
+			outList <- item
+		}
+		wg.Done()
+	}()
+
+	for {
+		partIndex := int(atomic.AddUint32(&partIndexAtomic, 1) - 1)
+		if partIndex >= max {
+			break
+		}
+		bb := bytesList[partIndex]
+		partInfo = partFileInfos[bb[0]][bb[1]]
+		sum := partInfo.total
+		if sum > 0 {
+			pos := partInfo.offset
+			// fmt.Printf("sortAndWrite:%s,start=%d\n", bb, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
+			s := time.Now().UnixNano()
+			var lines = aGetLines(bb, workDir)
+			cost += (time.Now().UnixNano() - s)
+			ch <- OutPart{
+				lines:  lines,
+				sum:    sum,
 				offset: pos,
 			}
-
-			outList <- part
 			//fmt.Printf("sortAndWrite%d:%s,end=%d\n", index, bb, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 		}
 	}
+	close(ch)
+	wg.Wait()
 	fmt.Printf("sort read%d real-cost:%d;sort-cost=%d\n", index, cost/int64(time.Millisecond), sortCost/int64(time.Millisecond))
 	stopWg.Done()
 
 }
 
 type OutPart struct {
+	lines  [][]byte
 	bytes  []byte
 	offset int64
+	sum    int
 }
+
+var bytesPool *sync.Pool
 
 func main() {
 
@@ -468,52 +400,72 @@ func main() {
 	parts, realNum := splitFile(in, fSize, partNum)
 	fmt.Printf("0.splitFileCost = %d,realNum=%d\n", time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond), realNum)
 
-	var fsAll [128][128][CPU]int
+	for _, b := range bytesList {
+		stopWg.Add(1)
+		go func(b [2]byte) {
+			defer stopWg.Done()
+			filename := workDir + string(b[0])
+			if b[1] != 0 {
+				filename = filename + string(b[1])
+			}
+			for index := 0; index < CPU; index++ {
+				tmpFile, _ := os.Create(filename + "." + strconv.Itoa(index))
+				partFileInfos[b[0]][b[1]].files[index] = tmpFile
+			}
+		}(b)
+	}
+	stopWg.Wait()
 
 	for i := 0; i < CPU; i++ {
 		stopWg.Add(1)
-		go readAndPart(in, i, parts, realNum, &bytesList, workDir, &fsAll)
+		go readAndPart(in, i, parts, realNum, &bytesList, workDir)
 	}
 	stopWg.Wait()
 	fmt.Printf("1.readAndPart = %d\n", time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 
-	var fs [128][128]int
-	var fsPos [128][128]int64
 	var startPos int64
 	var sum int
+	var maxSize int64
 	for _, b := range bytesList {
-		fsPos[b[0]][b[1]] = startPos
+		partFileInfos[b[0]][b[1]].offset = startPos
 		sum = 0
-		for _, item := range fsAll[b[0]][b[1]] {
+		for _, item := range partFileInfos[b[0]][b[1]].size {
 			sum += item
+			maxSize = Max(maxSize, int64(item))
 		}
-		fs[b[0]][b[1]] = sum
+		partFileInfos[b[0]][b[1]].total = sum
 		startPos += int64(sum)
 	}
 	fmt.Printf("2.fileSizeCost = %d\n", time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 
 	// 3. sort and output
+	bytesPool = &sync.Pool{New: func() interface{} { return make([]byte, maxSize*CPU) }}
 	partIndexAtomic = 0
 	tasks := CPU
 	outList := make(chan OutPart, tasks)
 	for i := 0; i < tasks; i++ {
 		stopWg.Add(1)
-		go sortAndWrite(i, bytesList, workDir, &fsPos, &fs, outList, tasks)
+		go sortAndWrite(i, bytesList, workDir, outList, tasks)
 	}
 
 	outFile, _ := os.Create(out)
-	stopWg.Add(1)
+	var writeWg sync.WaitGroup
+	writeWg.Add(1)
 	go func() {
 		var cost int64
 		for outPart := range outList {
 			s := time.Now().UnixNano()
 			outFile.WriteAt(outPart.bytes, outPart.offset)
+			bytesPool.Put(outPart.bytes)
+			outPart.bytes = nil
 			cost += (time.Now().UnixNano() - s)
 		}
 		fmt.Println("write real-cost:", cost/int64(time.Millisecond))
-		stopWg.Done()
+		writeWg.Done()
 	}()
 
 	stopWg.Wait()
+	close(outList)
+	writeWg.Wait()
 	fmt.Printf("3.sortAndWriteStopChCost=%d\n", time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 }
