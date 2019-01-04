@@ -96,7 +96,7 @@ func asyncReadFileBytes(bb [2]byte, index int, ch chan []byte) {
 	len := partInfo.size[index]
 	// fmt.Printf("%s%d:%d\n", bb, index, len)
 	if len > 0 {
-		var mmap = bytesPool.Get().([]byte)[:len]
+		var mmap = make([]byte, len)
 		file.Seek(0, 0)
 		file.Read(mmap)
 		ch <- mmap
@@ -123,7 +123,6 @@ func bytes2Lines(bytesArray [][]byte) [][]byte {
 				list = append(list, line)
 				line, err = buf.ReadBytes('\n')
 			}
-			bytesPool.Put(bs)
 		}
 
 		return list
