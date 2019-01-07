@@ -117,7 +117,8 @@ func bytes2Lines(bytesArray [][]byte) [][]byte {
 	if ln > 0 {
 		var list = make([][]byte, 0, ln/10)
 
-		for _, bs := range bytesArray {
+		for i, bs := range bytesArray {
+			bytesArray[i] = nil
 			buf := bytes.NewBuffer(bs)
 			var line, err = buf.ReadBytes('\n')
 			for err == nil {
@@ -337,7 +338,7 @@ func sortAndWrite(index int, bytesList [26 * 27][2]byte, workDir string, outList
 
 		if sum > 0 {
 
-			if sum > 2*G {
+			if sum > G {
 				fmt.Println("single file > 2g")
 				os.Exit(-3)
 			}
