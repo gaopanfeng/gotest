@@ -351,7 +351,7 @@ func sortAndWrite(index int, bytesList [26 * 27][2]byte, workDir string, outList
 			}
 
 			pos := partInfo.offset
-			// fmt.Printf("sortAndWrite:%s,start=%d\n", bb, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
+			fmt.Printf("sortAndWrite%d:%s,size=%dM,start=%d\n", index, bb, sum/M, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 			s := time.Now().UnixNano()
 			var lines = aGetLines(bb, workDir)
 			cost += (time.Now().UnixNano() - s)
@@ -377,7 +377,7 @@ func sortAndWrite(index int, bytesList [26 * 27][2]byte, workDir string, outList
 				sum:    sum,
 				offset: pos,
 			}
-			//fmt.Printf("sortAndWrite%d:%s,end=%d\n", index, bb, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
+			fmt.Printf("sortAndWrite%d:%s,size=%dM,end=%d\n", index, bb, sum/M, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 		}
 	}
 	close(ch)
