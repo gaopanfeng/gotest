@@ -36,6 +36,7 @@ var startTime time.Time
 var stopWg sync.WaitGroup
 var partIndexAtomic uint32
 var lock sync.Mutex
+var totalBytesAtomic int64
 
 // var fsFile [128][128][CPU]*os.File
 var partFileInfos [128][128]PartFileInfo
@@ -192,9 +193,10 @@ func merge(array [][]byte, tmp [][]byte, leftStart int, leftEnd int, rightStart 
 		rightStart++
 	}
 
-	for i := start; i < tmpPos; i++ {
-		array[i] = tmp[i]
-	}
+	// for i := start; i < tmpPos; i++ {
+	// 	array[i] = tmp[i]
+	// }
+	copy(array[start:tmpPos], tmp[start:tmpPos])
 }
 
 func mergeSort(array [][]byte, tmp [][]byte, start int, end int) {
@@ -309,13 +311,15 @@ func sortAndWrite(index int, bytesList [26 * 27][2]byte, workDir string, outList
 			var tmp = make([][]byte, len(lines))
 			mergeSort(lines, tmp, 0, len(lines)-1)
 			sortCost += (time.Now().UnixNano() - s)
-			var buf = bytesPool.Get().([]byte)[:0]
+			tmp = nil
+			var buf = make([]byte, 0, item.sum)
 			for _, item := range lines {
 				buf = append(buf, item...)
 				// buf = append(buf, byte('\n'))
 			}
 
 			item.bytes = buf
+			item.lines = nil
 
 			outList <- item
 		}
@@ -330,12 +334,43 @@ func sortAndWrite(index int, bytesList [26 * 27][2]byte, workDir string, outList
 		bb := bytesList[partIndex]
 		partInfo = partFileInfos[bb[0]][bb[1]]
 		sum := partInfo.total
+
 		if sum > 0 {
+
+			if sum > 2*G {
+				fmt.Println("single file > 2g")
+				os.Exit(-3)
+			}
+			for {
+				if atomic.AddInt64(&totalBytesAtomic, int64(sum)) < 2*G {
+					break
+				}
+				atomic.AddInt64(&totalBytesAtomic, int64(-sum))
+				runtime.Gosched()
+			}
+
 			pos := partInfo.offset
 			// fmt.Printf("sortAndWrite:%s,start=%d\n", bb, time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 			s := time.Now().UnixNano()
 			var lines = aGetLines(bb, workDir)
 			cost += (time.Now().UnixNano() - s)
+			// s = time.Now().UnixNano()
+			// var tmp = make([][]byte, len(lines))
+			// mergeSort(lines, tmp, 0, len(lines)-1)
+			// sortCost += (time.Now().UnixNano() - s)
+			// var buf = make([]byte, 0, sum)
+			// for _, item := range lines {
+			// 	buf = append(buf, item...)
+			// 	// buf = append(buf, byte('\n'))
+			// }
+
+			// item.bytes = buf
+
+			// outList <- OutPart{
+			// 	sum:    sum,
+			// 	offset: pos,
+			// 	bytes:  buf,
+			// }
 			ch <- OutPart{
 				lines:  lines,
 				sum:    sum,
@@ -357,8 +392,6 @@ type OutPart struct {
 	offset int64
 	sum    int
 }
-
-var bytesPool *sync.Pool
 
 func main() {
 
@@ -438,7 +471,6 @@ func main() {
 	fmt.Printf("2.fileSizeCost = %d\n", time.Now().Sub(startTime).Nanoseconds()/int64(time.Millisecond))
 
 	// 3. sort and output
-	bytesPool = &sync.Pool{New: func() interface{} { return make([]byte, maxSize*CPU) }}
 	partIndexAtomic = 0
 	tasks := CPU
 	outList := make(chan OutPart, tasks)
@@ -455,9 +487,9 @@ func main() {
 		for outPart := range outList {
 			s := time.Now().UnixNano()
 			outFile.WriteAt(outPart.bytes, outPart.offset)
-			bytesPool.Put(outPart.bytes)
-			outPart.bytes = nil
 			cost += (time.Now().UnixNano() - s)
+			outPart.bytes = nil
+			atomic.AddInt64(&totalBytesAtomic, int64(-outPart.sum))
 		}
 		fmt.Println("write real-cost:", cost/int64(time.Millisecond))
 		writeWg.Done()
